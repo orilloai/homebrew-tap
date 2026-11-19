@@ -1,0 +1,6 @@
+.DS_Store
+*.bottle.*
+.bundle/
+vendor/
+# brew test-bot writes these.
+steps_output.txt
