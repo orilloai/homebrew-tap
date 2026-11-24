@@ -1,0 +1,77 @@
+# Takes the cask from placket's latest published release, checks it against the release's signed
+# checksums.txt, and brings it here. Hourly, and by hand, so the tap follows a release within the
+# hour with no step after the release merge.
+#
+# A routine update, one in which only the version and the four SHA-256s change, is pushed to main:
+# those are the lines the signed checksums.txt vouches for. Any other change, such as a new install
+# step or URL, is opened as a pull request on update-cask for the maintainer to review, since
+# placket.rb itself is not signed. The main ruleset lets GitHub Actions push past its review for the
+# routine case.
+name: update
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: update
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+      - name: Take the cask from placket's latest published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag=$(gh release view --repo orilloai/placket --json tagName --jq .tagName)
+          d=$RUNNER_TEMP/release
+          gh release download "$tag" --repo orilloai/placket --dir "$d" \
+            --pattern placket.rb --pattern checksums.txt --pattern checksums.txt.sigstore.json
+          cosign verify-blob --bundle "$d/checksums.txt.sigstore.json" \
+            --certificate-identity https://github.com/orilloai/placket/.github/workflows/release.yml@refs/heads/main \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$d/checksums.txt"
+          # Each SHA-256 of the cask is an archive's line in checksums.txt, one for each of the four.
+          sed -n 's/^ *sha256 "\([0-9a-f]\{64\}\)"$/\1/p' "$d/placket.rb" >"$d/sums"
+          n=0
+          while read -r s; do
+            grep -q "^$s  placket_.*\.tar\.gz\$" "$d/checksums.txt" || { echo "::error::sha256 $s is no archive's line in checksums.txt"; exit 1; }
+            n=$((n + 1))
+          done <"$d/sums"
+          [ "$n" -eq 4 ] || { echo "::error::the cask has $n SHA-256s, not 4"; exit 1; }
+          # GoReleaser writes a comment where a cask with nothing to zap says so, which brew style
+          # refuses (Cask/ZapNotRequired): the one line this tap writes otherwise than the release.
+          sed 's/^  # No zap stanza required$/  zap :not_required/' "$d/placket.rb" >"$d/cask.rb"
+          mkdir -p Casks
+          if cmp -s "$d/cask.rb" Casks/placket.rb; then echo "the cask is already $tag's"; exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # The cask with its version and SHA-256 lines left out: what checksums.txt does not vouch for.
+          shape() { grep -v -E '^ *(version "[^"]*"|sha256 "[0-9a-f]{64}")$' "$1" 2>/dev/null || true; }
+          if [ -f Casks/placket.rb ] && [ "$(shape "$d/cask.rb")" = "$(shape Casks/placket.rb)" ]; then
+            cp "$d/cask.rb" Casks/placket.rb
+            git add Casks/placket.rb
+            git commit -m "placket $tag"
+            git push origin HEAD:main
+            echo "pushed the cask of $tag: only its version and SHA-256s changed"
+            exit 0
+          fi
+          # Anything else changed: a pull request for the maintainer, on one branch, refreshed in place.
+          git switch -c update-cask
+          cp "$d/cask.rb" Casks/placket.rb
+          git add Casks/placket.rb
+          git commit -m "placket $tag, with changes beyond its version and SHA-256s"
+          git push --force origin update-cask
+          if [ -z "$(gh pr list --head update-cask --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head update-cask --title "placket $tag: the cask changes beyond its version and SHA-256s" \
+              --body "The cask of placket $tag changes more than its version and its four SHA-256s, which the release's signed checksums.txt vouches for; the rest of placket.rb is not signed. Its SHA-256s were checked. Review the diff, then merge."
+          fi
+          echo "::notice::opened or refreshed the pull request on update-cask: the cask of $tag changes beyond its version and SHA-256s"
