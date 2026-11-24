@@ -47,14 +47,17 @@ jobs:
             n=$((n + 1))
           done <"$d/sums"
           [ "$n" -eq 4 ] || { echo "::error::the cask has $n SHA-256s, not 4"; exit 1; }
+          # GoReleaser writes a comment where a cask with nothing to zap says so, which brew style
+          # refuses (Cask/ZapNotRequired): the one line this tap writes otherwise than the release.
+          sed 's/^  # No zap stanza required$/  zap :not_required/' "$d/placket.rb" >"$d/cask.rb"
           mkdir -p Casks
-          if cmp -s "$d/placket.rb" Casks/placket.rb; then echo "the cask is already $tag's"; exit 0; fi
+          if cmp -s "$d/cask.rb" Casks/placket.rb; then echo "the cask is already $tag's"; exit 0; fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           # The cask with its version and SHA-256 lines left out: what checksums.txt does not vouch for.
           shape() { grep -v -E '^ *(version "[^"]*"|sha256 "[0-9a-f]{64}")$' "$1" 2>/dev/null || true; }
-          if [ -f Casks/placket.rb ] && [ "$(shape "$d/placket.rb")" = "$(shape Casks/placket.rb)" ]; then
-            cp "$d/placket.rb" Casks/placket.rb
+          if [ -f Casks/placket.rb ] && [ "$(shape "$d/cask.rb")" = "$(shape Casks/placket.rb)" ]; then
+            cp "$d/cask.rb" Casks/placket.rb
             git add Casks/placket.rb
             git commit -m "placket $tag"
             git push origin HEAD:main
@@ -63,7 +66,7 @@ jobs:
           fi
           # Anything else changed: a pull request for the maintainer, on one branch, refreshed in place.
           git switch -c update-cask
-          cp "$d/placket.rb" Casks/placket.rb
+          cp "$d/cask.rb" Casks/placket.rb
           git add Casks/placket.rb
           git commit -m "placket $tag, with changes beyond its version and SHA-256s"
           git push --force origin update-cask
